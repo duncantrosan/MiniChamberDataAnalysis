@@ -118,6 +118,12 @@ BIAS_VOLTAGE  = 0.0
 NSMALLEST_PER_GROUP = 3
 CHI2_MAX = None
 
+# Leading/trailing partial sawtooth periods (scope record cut mid-sweep) often
+# miss most of the absorption line. A near-flat trace fits with a LOW chi2, so
+# the nsmallest-chi2 cut picks them over the real full periods and drags area
+# (N_s) down. Excluded before the chi2 ranking unless this is True.
+INCLUDE_PARTIAL_PERIODS = False
+
 GROUP_KEYS = ['row_uid']
 
 # --- Fitting -----------------------------------------------------------------
@@ -956,11 +962,14 @@ def _plot_fit_diagnostic(res, filename):
 
 def filter_and_aggregate(results_df, nsmallest=NSMALLEST_PER_GROUP,
                          chi2_max=CHI2_MAX, group_keys=GROUP_KEYS,
-                         index=None):
+                         index=None, include_partial=INCLUDE_PARTIAL_PERIODS):
     """
     Filter per-period fits and aggregate to one row per group (one per scope
     file), carrying Birge-combined uncertainties on FWHM and area, PLUS the
     frequency-axis jitter needed to split statistical error later.
+
+    Partial periods are dropped first (see INCLUDE_PARTIAL_PERIODS). Done here
+    rather than in process_index so it also applies to a cached RAW_CSV.
     """
     print(f"\n{'=' * 60}\nFILTERING & AGGREGATION\n{'=' * 60}\n")
 
@@ -970,6 +979,18 @@ def filter_and_aggregate(results_df, nsmallest=NSMALLEST_PER_GROUP,
     removed = len(results_df) - len(stage)
     diagnostics["stages"]["dropna_chi2"] = {"removed": removed, "remaining": len(stage)}
     print(f"After dropna(Chi^2):      removed {removed}, remaining {len(stage)}")
+
+    if not include_partial:
+        if 'period_label' in stage.columns:
+            before = len(stage)
+            partial = stage['period_label'].astype(str).str.contains('partial')
+            stage = stage[~partial]
+            diagnostics["stages"]["partial_periods"] = {
+                "removed": before - len(stage), "remaining": len(stage)}
+            print(f"After dropping partials:  removed {before - len(stage)}, "
+                  f"remaining {len(stage)}")
+        else:
+            print("WARNING: no 'period_label' column; cannot drop partial periods")
 
     if chi2_max is not None:
         before = len(stage)
@@ -1841,13 +1862,14 @@ def inspect_point(index, filtered=None, show_periods=False, period=None,
         except RuntimeError as e:
             print(f"  period {k}: fit failed - {e}")
             continue
+        partial = 'partial' in p['label'] and not INCLUDE_PARTIAL_PERIODS
         res['period'] = k
-        res['kept'] = k in kept
+        res['kept'] = (not kept or k in kept) and not partial
         f_native = np.sort(f[mask]) / 1e9
         res['f_data'] = f_native - res['x0']
         res['y_data'] = y[mask][np.argsort(f[mask])]
         out.append(res)
-        flag = 'KEPT' if (not kept or k in kept) else 'cut'
+        flag = 'KEPT' if res['kept'] else ('cut: partial' if partial else 'cut')
         print(f"  period {k} [{flag}]: FWHM {res['fwhm']:.3f} +/- "
               f"{res['fwhm_err']:.3f} GHz, area {res['area']:.4f}, "
               f"chi2 {res['Chi^2']:.2f}, inflate {res['inflate']:.1f}x")

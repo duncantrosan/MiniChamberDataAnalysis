@@ -61,6 +61,11 @@ MIN_PEAKS_PER_PERIOD = 3
 BASELINE_ORDER = 1
 
 CHI2_MAX = None           # e.g. 5.0 to reject bad periods; None keeps all
+
+# Leading/trailing partial sawtooth periods (scope record cut mid-sweep) often
+# miss most of the absorption line, yet fit with small errors and drag the
+# Birge-weighted area down. Excluded unless this is True.
+INCLUDE_PARTIAL_PERIODS = False
 PLOT = True
 
 # Width of the smoothing window used to detect correlated (non-white) residual
@@ -1725,7 +1730,10 @@ def analyze(path_on, path_off, ref_on, ref_off, plot=PLOT):
         res['period'] = k
         res['label'] = p['label']
         res['keep'] = True
-        if res['at_bound']:
+        if 'partial' in p['label'] and not INCLUDE_PARTIAL_PERIODS:
+            res['keep'] = False
+            print(f'  period {k}: {p["label"]} - excluded')
+        elif res['at_bound']:
             res['keep'] = False
             print(f'  period {k}: fit on a parameter bound - excluded')
         elif CHI2_MAX is not None and res['chi2'] > CHI2_MAX:
@@ -1969,7 +1977,7 @@ if __name__ == '__main__':
     plot_error_budget(results, freq_err)
 
     plot_absorbance_with_deviation(results, 1.0)
-    prop = plot_absorbance_propagated(results, PATH_ON, PATH_OFF, REF_ON, REF_OFF)
+    prop = plot_absorbance_propagated(results, *paths)
 
     # -------------------------------------------------------------------
     # Bootstrap. 'block' resamples whole periods (honest for correlated
