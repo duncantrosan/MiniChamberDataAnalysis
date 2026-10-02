@@ -1,0 +1,57 @@
+{
+  "created": "2026-10-02T17:27:11",
+  "runtime_s": 84.2,
+  "script": "LASAnalysisv6.py",
+  "code_version": "8390102",
+  "input_dataframe": "/home/user/MiniChamberDataAnalysis/TestData/Nafisa_Requested_Data_0.7Torr/LAS_DataFrame_33a310dd_Laser_True_20260922_151050.csv",
+  "laser_off_dataframes": [
+    "/home/user/MiniChamberDataAnalysis/TestData/Nafisa_Requested_Data_0.7Torr/LAS_DataFrame_34299012_Laser_False_20260923_142611.csv"
+  ],
+  "outputs": {
+    "measurements": "/home/user/MiniChamberDataAnalysis/Output/Nafisa_Requested_Data_0.7Torr/LAS_DataFrame_33a310dd_Laser_True_20260922_151050_LAS.csv",
+    "final_table": "/home/user/MiniChamberDataAnalysis/Output/Nafisa_Requested_Data_0.7Torr/LAS_DataFrame_33a310dd_Laser_True_20260922_151050_LAS_FinalTable.csv",
+    "file_results": "/home/user/MiniChamberDataAnalysis/Output/Nafisa_Requested_Data_0.7Torr/LAS_DataFrame_33a310dd_Laser_True_20260922_151050_LAS_FileResults.csv",
+    "period_fits": "/home/user/MiniChamberDataAnalysis/Output/Nafisa_Requested_Data_0.7Torr/LAS_DataFrame_33a310dd_Laser_True_20260922_151050_LAS_PeriodFits.csv",
+    "run_info": "/home/user/MiniChamberDataAnalysis/Output/Nafisa_Requested_Data_0.7Torr/LAS_DataFrame_33a310dd_Laser_True_20260922_151050_LAS_RunInfo.json"
+  },
+  "counts": {
+    "scope_files": 102,
+    "period_fits": 510,
+    "scope_files_with_result": 102
+  },
+  "settings": {
+    "NSMALLEST_PER_GROUP": 3,
+    "CHI2_MAX": null,
+    "INCLUDE_PARTIAL_PERIODS": false,
+    "GROUP_KEYS": [
+      "row_uid"
+    ],
+    "PAIR_STRATEGIES": [
+      "path",
+      "basename",
+      "condition",
+      "params",
+      "fuzzy"
+    ],
+    "FSR": 1500000000.0,
+    "FSR_REL_ERR": 0.005,
+    "L_PATH": 0.04,
+    "L_PATH_REL_ERR": 0.1,
+    "A_KI": 6400000.0,
+    "A_KI_REL_ERR": 0.07,
+    "LAMBDA_0": 6.965431e-07,
+    "M_AR": 40.0,
+    "G_LOWER": 5,
+    "G_UPPER": 3,
+    "MIN_POINTS_PER_PERIOD": 50,
+    "MIN_PEAKS_PER_PERIOD": 3,
+    "STRUCTURE_WINDOW": 401,
+    "FP_CHANNEL": "CH1",
+    "RAMP_CHANNEL": "CH2",
+    "DIODE_CHANNEL": "CH3",
+    "BIAS_VOLTAGE": 0.0,
+    "RUN_RAW_PROCESSING": true,
+    "DATA_ROOT": "D:\\Data"
+  },
+  "warnings": []
+}
