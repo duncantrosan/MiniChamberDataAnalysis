@@ -47,10 +47,14 @@ No bootstrapping - the covariance+Birge+decomposition path only.
 @author: dptro
 """
 
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 import glob
+import json
 import os
 import re
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -61,26 +65,51 @@ from scipy.interpolate import griddata, PchipInterpolator
 from scipy.stats import linregress
 from scipy.spatial import cKDTree
 
+try:
+    _HERE = Path(__file__).resolve().parent
+except NameError:                        # pasted into a console
+    _HERE = Path.cwd()
+sys.path.insert(0, str(_HERE.parent))    # DataAnalysis/: OutputPaths, MasterList
+from OutputPaths import OUTPUT_ROOT, output_dir, output_file
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
 DATA_ROOT = r"D:\Data"
 
+# Folder holding the run's acquisition dataframes. Can also be given on the
+# command line, one or more run folders, each analysed separately:
+#     python LASAnalysisv6.py "D:\Data\NafisaData\<run folder>" ...
 Location = r'D:\Data\NafisaData\LAS_1.0Torr_SmallAdmixture_1kHzLaserFreq_N1.3_very_fine'
-TrueName = r'\LAS_DataFrame_*_Laser_True_*.csv'
-FalseName = r'\LAS_DataFrame_*_Laser_False_*.csv'
-DF_TRUE = Location + TrueName
-DF_FALSE = Location + FalseName
+TrueName = 'LAS_DataFrame_*_Laser_True_*.csv'
+FalseName = 'LAS_DataFrame_*_Laser_False_*.csv'
+DF_TRUE = os.path.join(Location, TrueName)
+DF_FALSE = os.path.join(Location, FalseName)
 
+# False: skip the slow fitting and reuse the period fits saved by the last run
+# (<dataframe>_LAS_PeriodFits.csv), e.g. to try other filter settings.
 RUN_RAW_PROCESSING = True
 
-RAW_CSV      = 'MasterResults_RawData_FrequencySweep_veryFine.csv'
-SUMMARY_CSV  = 'MasterResults_Summary_03_FrequencySweep_veryFine.csv'
-PHYSICS_CSV  = 'PhysicsDataFrame1TorrOptimal'
-FINAL_CSV = 'ReruningN21TorrTest'
-OUT_SUFFIX = '_with_Tg_Ns'
-DATAFRAME_OUT = None
+# --- Output --------------------------------------------------------------------
+# Everything goes to Output/<run folder>/ (see DataAnalysis/OutputPaths.py),
+# named after the Laser_True dataframe it came from:
+#   <dataframe>_LAS.csv              the input dataframe, same rows, plus the
+#                                    T_gas / N_s columns. The master list uses this.
+#   <dataframe>_LAS_FinalTable.csv   clean table of inputs and results
+#   <dataframe>_LAS_FileResults.csv  one row per scope file: fit summary, Birge
+#                                    ratios, physics with stat/sys errors
+#   <dataframe>_LAS_PeriodFits.csv   one row per sawtooth period (the raw fits)
+#   <dataframe>_LAS_RunInfo.json     inputs, settings and warnings of the run
+#   LAS_figures/                     plots
+OUTPUT_TAG = 'LAS'
+
+# Add <dataframe>_LAS.csv to the master list (Output/Master) after each run.
+# Re-running a dataset replaces its old entries, it never double counts.
+ADD_TO_MASTER = True
+
+# Stems of files this script (or older versions of it) wrote; never read as input.
+SKIP_SUFFIXES = ('_with_Tg_Ns', '_' + OUTPUT_TAG)
 
 COLUMN_MAP = {
     'power':    'power',
@@ -151,8 +180,21 @@ FSR_REL_ERR    = 0.005    # etalon free spectral range uncertainty (0.5 %).
 
 # --- Plotting ----------------------------------------------------------------
 SAVE_FIGURES = True
-FIG_DIR = 'figures'
+FIG_DIR = OUTPUT_ROOT / 'LAS_figures'    # main() points this at Output/<run>/LAS_figures
 PLOT_EVERY_N_FITS = None
+
+# Settings copied into <dataframe>_LAS_RunInfo.json
+RUN_INFO_SETTINGS = [
+    'NSMALLEST_PER_GROUP', 'CHI2_MAX', 'INCLUDE_PARTIAL_PERIODS', 'GROUP_KEYS',
+    'PAIR_STRATEGIES', 'FSR', 'FSR_REL_ERR', 'L_PATH', 'L_PATH_REL_ERR',
+    'A_KI', 'A_KI_REL_ERR', 'LAMBDA_0', 'M_AR', 'G_LOWER', 'G_UPPER',
+    'MIN_POINTS_PER_PERIOD', 'MIN_PEAKS_PER_PERIOD', 'STRUCTURE_WINDOW',
+    'FP_CHANNEL', 'RAMP_CHANNEL', 'DIODE_CHANNEL', 'BIAS_VOLTAGE',
+    'RUN_RAW_PROCESSING', 'DATA_ROOT',
+]
+
+# Problems met during a run; written to the run info file.
+RUN_WARNINGS = []
 
 
 # =============================================================================
@@ -299,7 +341,8 @@ def _as_path_list(spec):
         item = str(item)
         hits = glob.glob(item, recursive=True)
         out.extend(hits if hits else ([item] if os.path.isfile(item) else []))
-    out = [f for f in out if not Path(f).stem.endswith(OUT_SUFFIX)]
+    out = [os.path.abspath(f) for f in out
+           if not Path(f).stem.endswith(SKIP_SUFFIXES)]
     return sorted(dict.fromkeys(out))
 
 
@@ -309,19 +352,32 @@ def _normalise(rel):
 
 
 def resolve_path(rel, data_root=DATA_ROOT, df_path=None, _cache={}):
-    """Turn a dataframe path into something openable (see original docstring)."""
+    """
+    Turn a path stored in a dataframe into a file that exists, trying:
+      1. next to the dataframe: <its folder>/<last folder of rel>/<file name>,
+         e.g. OscopeData_Laser_True/Scope_...csv. This keeps working after the
+         run folder is moved, renamed or copied to another computer.
+      2. rel itself, if absolute
+      3. DATA_ROOT / rel
+      4. rel below the dataframe's folder and each folder above it
+    Returns None if nothing exists.
+    """
     rel = _normalise(rel)
     key = (str(rel), str(data_root), str(df_path))
     if key in _cache:
         return _cache[key]
 
     candidates = []
+    if df_path is not None:
+        here = Path(df_path).resolve().parent
+        if rel.parent.name:
+            candidates.append(here / rel.parent.name / rel.name)
+        candidates.append(here / rel.name)
     if rel.is_absolute():
         candidates.append(rel)
     if data_root:
         candidates.append(Path(data_root) / rel)
     if df_path is not None:
-        here = Path(df_path).resolve().parent
         candidates.extend(anc / rel for anc in [here, *here.parents])
 
     found = next((c for c in candidates if c.exists()), None)
@@ -459,7 +515,8 @@ def _pair_frames(t, f_, column_map, strategies=PAIR_STRATEGIES):
 
 
 def _read_run_dataframe(path):
-    df = pd.read_csv(path)
+    # run_id as text: an all-digit id like 34299012 would otherwise become a number
+    df = pd.read_csv(path, dtype={RUN_ID_COL: str})
     df['_df_source'] = str(path)
     return df
 
@@ -526,34 +583,55 @@ def load_run_index(df_true=DF_TRUE, df_false=DF_FALSE, data_root=DATA_ROOT,
         if c in pairs.columns:
             idx[c] = pairs[c].to_numpy()
 
+    # laser-off files are looked up next to the laser-off dataframe
     df_src = pairs['_df_source']
+    df_src_off = pairs.get('_df_source_off', df_src)
     idx['path_on']  = [resolve_path(p, data_root, s)
                        for p, s in zip(pairs[SCOPE_COL], df_src)]
     idx['path_off'] = [resolve_path(p, data_root, s)
-                       for p, s in zip(pairs[f'{SCOPE_COL}_off'], df_src)]
+                       for p, s in zip(pairs[f'{SCOPE_COL}_off'], df_src_off)]
     idx['ref_on']   = [resolve_path(p, data_root, s)
                        for p, s in zip(pairs[SCOPE_OFF_COL], df_src)]
     idx['ref_off']  = [resolve_path(p, data_root, s)
-                       for p, s in zip(pairs[f'{SCOPE_OFF_COL}_off'], df_src)]
+                       for p, s in zip(pairs[f'{SCOPE_OFF_COL}_off'], df_src_off)]
 
     idx['basename'] = pairs['_basename'].to_numpy()
     idx['df_source'] = df_src.to_numpy()
     idx['run_id_off'] = pairs[f'{RUN_ID_COL}_off'].to_numpy()
     idx['row_uid'] = (pairs[RUN_ID_COL].astype(str) + '|' + pairs['_basename'])
 
-    if idx['row_uid'].duplicated().any():
-        n = int(idx['row_uid'].duplicated().sum())
-        print(f"WARNING: {n} duplicate row_uid values; results for those rows "
-              f"will be pooled rather than kept separate")
+    # One scope file on several rows: the collection code saved several
+    # measurements under the same file name and each overwrote the last, so the
+    # file only holds the LAST row's data. Fit it once and keep that row (its
+    # power / gamma / pressure readings go with the data in the file).
+    shared = idx['row_uid'].duplicated(keep=False)
+    if shared.any():
+        n_files = idx.loc[shared, 'row_uid'].nunique()
+        when = (pd.to_datetime(pairs['timestamp'], errors='coerce')
+                if 'timestamp' in pairs.columns
+                else pd.Series(np.arange(len(pairs)), index=pairs.index))
+        idx['_when'] = when.to_numpy()
+        idx = (idx.sort_values('_when', kind='stable')
+                  .drop_duplicates('row_uid', keep='last')
+                  .drop(columns='_when')
+                  .sort_index())
+        msg = (f"{n_files} scope files are each listed on more than one row "
+               f"({int(shared.sum())} rows). Each file only holds the last "
+               f"measurement written to it, so it is fitted once and its "
+               f"result goes to the latest of those rows only.")
+        print(f"\nWARNING: {msg}")
+        RUN_WARNINGS.append(msg)
 
     missing_cols = ['path_on', 'path_off', 'ref_on', 'ref_off']
     miss = idx[missing_cols].isna().any(axis=1)
     if miss.any():
         print(f"\nWARNING: {int(miss.sum())} rows have unresolvable file paths.")
-        bad = pairs.loc[miss.to_numpy(), SCOPE_COL].head(3).tolist()
+        bad = pairs.loc[miss[miss].index, SCOPE_COL].head(3).tolist()
         for b in bad:
             print(f"   {b}")
         print(f"   DATA_ROOT is currently: {data_root}")
+        RUN_WARNINGS.append(f"{int(miss.sum())} rows have scope files that could "
+                            f"not be found, e.g. {bad[:1]}")
         if require_files:
             idx = idx[~miss].copy()
             print(f"   Dropped; {len(idx)} rows remain.")
@@ -909,6 +987,8 @@ def process_index(index, plot_every=PLOT_EVERY_N_FITS):
         print(f"Failed files: {len(failures)}")
         for name, err in failures[:5]:
             print(f"   {name}: {err}")
+        RUN_WARNINGS.append(f"{len(failures)} scope files failed: "
+                            + "; ".join(f"{n}: {e}" for n, e in failures))
     if len(master):
         print(f"Files with >=1 fit: {master['row_uid'].nunique()}")
         if 'inflate' in master:
@@ -969,7 +1049,7 @@ def filter_and_aggregate(results_df, nsmallest=NSMALLEST_PER_GROUP,
     frequency-axis jitter needed to split statistical error later.
 
     Partial periods are dropped first (see INCLUDE_PARTIAL_PERIODS). Done here
-    rather than in process_index so it also applies to a cached RAW_CSV.
+    rather than in process_index so it also applies to cached period fits.
     """
     print(f"\n{'=' * 60}\nFILTERING & AGGREGATION\n{'=' * 60}\n")
 
@@ -1197,6 +1277,7 @@ def build_final_table(summary):
         'Power_Input_W':       s['power'],
         'Pressure_Input_Torr': s['pressure'],
         'N2_Percent_Input':    s['n2_flow'],
+        'Frequency_Input_MHz': s['freq'],
 
         'Power_Measured_W':       s.get('delivered_power'),
         'Power_Measured_W_err':   s.get('delivered_power_error'),
@@ -1251,9 +1332,15 @@ PHYSICS_OUT_COLS = {
 }
 
 
-def attach_to_dataframe(summary, df_true=DF_TRUE, out_path=DATAFRAME_OUT,
-                        cols=PHYSICS_OUT_COLS):
-    """Append physics (with stat/sys errors) to the Laser_True dataframe."""
+def attach_to_dataframe(summary, df_true=DF_TRUE, cols=PHYSICS_OUT_COLS):
+    """
+    Append physics (with stat/sys errors) to each Laser_True dataframe and save
+    it as Output/<run folder>/<dataframe>_LAS.csv: the input dataframe, same
+    rows and columns, plus the result columns. The master list reads this file.
+
+    Rows that share a scope file (see load_run_index) get the result only on
+    the latest of them; the others get NaN and a note in 'LAS_note'.
+    """
     print(f"\n{'=' * 60}\nAPPENDING PHYSICS TO ACQUISITION DATAFRAME\n{'=' * 60}\n")
 
     if 'row_uid' not in summary.columns:
@@ -1262,10 +1349,11 @@ def attach_to_dataframe(summary, df_true=DF_TRUE, out_path=DATAFRAME_OUT,
 
     keep = ['row_uid'] + [c for c in cols if c in summary.columns]
     phys = summary[keep].rename(columns=cols).drop_duplicates('row_uid')
+    result_cols = [c for c in phys.columns if c != 'row_uid']
 
     outputs = []
     for path in _as_path_list(df_true):
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, dtype={RUN_ID_COL: str})
         if RUN_ID_COL not in df.columns:
             df[RUN_ID_COL] = 'run0'
         basename = df[SCOPE_COL].map(
@@ -1273,13 +1361,25 @@ def attach_to_dataframe(summary, df_true=DF_TRUE, out_path=DATAFRAME_OUT,
         df['row_uid'] = df[RUN_ID_COL].astype(str) + '|' + basename
 
         merged = df.merge(phys, on='row_uid', how='left')
+
+        shared = merged['row_uid'].duplicated(keep=False)
+        if shared.any():
+            when = (pd.to_datetime(merged['timestamp'], errors='coerce')
+                    if 'timestamp' in merged.columns
+                    else pd.Series(np.arange(len(merged)), index=merged.index))
+            order = when.sort_values(kind='stable').index
+            stale = merged.loc[order, 'row_uid'].duplicated(keep='last')
+            stale = stale[stale].index
+            merged.loc[stale, result_cols] = np.nan
+            merged['LAS_note'] = ''
+            merged.loc[stale, 'LAS_note'] = 'scope file overwritten by a later row'
+            print(f"  {len(stale)} rows share their scope file with a later row "
+                  f"and get no result (see LAS_note)")
+
         n_hit = merged['T_gas_K'].notna().sum() if 'T_gas_K' in merged else 0
         print(f"{Path(path).name}: {n_hit}/{len(merged)} rows got results")
 
-        if out_path is None:
-            target = Path(path).with_name(Path(path).stem + OUT_SUFFIX + '.csv')
-        else:
-            target = Path(out_path)
+        target = output_file(path, OUTPUT_TAG)
         merged.to_csv(target, index=False)
         print(f"  -> {target}")
         outputs.append(merged)
@@ -1927,36 +2027,114 @@ def _plot_data_vs_fit(fits, row, only_period=None):
 # MAIN
 # =============================================================================
 
-if __name__ == '__main__':
+def _las_outputs(df_path):
+    """Output files for one Laser_True dataframe (see the Output config block)."""
+    t = OUTPUT_TAG
+    return {
+        'measurements': output_file(df_path, t),
+        'final_table':  output_file(df_path, f'{t}_FinalTable'),
+        'file_results': output_file(df_path, f'{t}_FileResults'),
+        'period_fits':  output_file(df_path, f'{t}_PeriodFits'),
+        'run_info':     output_file(df_path, f'{t}_RunInfo', '.json'),
+    }
+
+
+def _by_source(frame):
+    """Split a results table by the Laser_True dataframe each row came from."""
+    return dict(tuple(frame.groupby('df_source', sort=False)))
+
+
+def _code_version():
+    """Git commit of this script, flagged if the file has local edits."""
+    try:
+        def git(*args):
+            return subprocess.run(['git', *args], cwd=_HERE, capture_output=True,
+                                  text=True, timeout=10).stdout.strip()
+        commit = git('rev-parse', '--short', 'HEAD')
+        if not commit:
+            return 'unknown (not a git checkout)'
+        edited = git('status', '--porcelain', '--', Path(__file__).name)
+        return commit + (' + local edits' if edited else '')
+    except Exception:
+        return 'unknown'
+
+
+def _write_run_info(df_path, df_false, outputs, index, raw, summary, started):
+    """Record what went into one run's outputs, next to them."""
+    uids = set(index.loc[index['df_source'] == str(df_path), 'row_uid'])
+    mine = summary[summary['row_uid'].isin(uids)]
+    info = {
+        'created': datetime.now().isoformat(timespec='seconds'),
+        'runtime_s': round((datetime.now() - started).total_seconds(), 1),
+        'script': 'LASAnalysisv6.py',
+        'code_version': _code_version(),
+        'input_dataframe': str(df_path),
+        'laser_off_dataframes': _as_path_list(df_false),
+        'outputs': {k: str(v) for k, v in outputs.items()},
+        'counts': {
+            'scope_files': len(uids),
+            'period_fits': int(raw['row_uid'].isin(uids).sum()),
+            'scope_files_with_result': int(mine['T_gas_K'].notna().sum()),
+        },
+        'settings': {k: globals()[k] for k in RUN_INFO_SETTINGS if k in globals()},
+        'warnings': list(RUN_WARNINGS),
+    }
+    outputs['run_info'].write_text(json.dumps(info, indent=2, default=str))
+    print(f"Saved run info         -> {outputs['run_info']}")
+
+
+def main(df_true=DF_TRUE, df_false=DF_FALSE, data_root=DATA_ROOT):
+    """
+    Full pipeline for one run: the Laser_True dataframe(s) in df_true and the
+    Laser_False one(s) in df_false. Results go to Output/<run folder>/.
+    Returns the intermediate tables as a dict.
+    """
+    global FIG_DIR
+    started = datetime.now()
+    RUN_WARNINGS.clear()
+
+    true_files = _as_path_list(df_true)
+    if not true_files:
+        raise FileNotFoundError(f"No Laser_True dataframe matched: {df_true}")
+    outputs = {f: _las_outputs(f) for f in true_files}
+    FIG_DIR = output_dir(true_files[0]) / f'{OUTPUT_TAG}_figures'
+
     # --- stage 0 ---
-    index = load_run_index()
+    index = load_run_index(df_true, df_false, data_root)
 
     # --- stage 1 ---
     if RUN_RAW_PROCESSING:
         raw = process_index(index)
         if len(raw) == 0:
             raise SystemExit("Aborting: no raw results.")
-        raw.to_csv(RAW_CSV, index=False)
-        print(f"\nSaved raw results -> {RAW_CSV}")
+        for src, part in _by_source(raw).items():
+            part.to_csv(outputs[src]['period_fits'], index=False)
+            print(f"\nSaved period fits      -> {outputs[src]['period_fits']}")
     else:
-        print(f"Loading cached raw results from {RAW_CSV}")
-        raw = pd.read_csv(RAW_CSV)
+        cached = [outputs[f]['period_fits'] for f in true_files]
+        missing = [str(p) for p in cached if not p.exists()]
+        if missing:
+            raise FileNotFoundError(
+                "RUN_RAW_PROCESSING = False, but these period fits don't exist "
+                "yet:\n  " + "\n  ".join(missing)
+                + "\nRun once with RUN_RAW_PROCESSING = True.")
+        print("Loading saved period fits:\n  " + "\n  ".join(map(str, cached)))
+        raw = pd.concat([pd.read_csv(p, dtype={RUN_ID_COL: str}) for p in cached],
+                        ignore_index=True)
 
     # --- stage 2 ---
     filtered, summary, diag = filter_and_aggregate(raw, index=index)
     if len(summary) == 0:
         raise SystemExit("Aborting: aggregation produced no rows.")
-    summary.to_csv(SUMMARY_CSV, index=False)
-    print(f"Saved summary -> {SUMMARY_CSV}")
 
     # --- stage 3 ---
     summary = add_physics(summary)
-    summary.to_csv(PHYSICS_CSV, index=False)
-    print(f"Saved derived quantities -> {PHYSICS_CSV}")
-
+    for src, part in _by_source(summary).items():
+        part.to_csv(outputs[src]['file_results'], index=False)
+        build_final_table(part).to_csv(outputs[src]['final_table'], index=False)
+        print(f"Saved per-file results -> {outputs[src]['file_results']}")
+        print(f"Saved final table      -> {outputs[src]['final_table']}")
     final_table = build_final_table(summary)
-    final_table.to_csv(FINAL_CSV, index=False)
-    print(f"Saved final table -> {FINAL_CSV}")
 
     print("\nSample rows:")
     cols = [c for c in ['power', 'pressure', 'n2_flow', 'freq', 'n_fits',
@@ -1967,7 +2145,24 @@ if __name__ == '__main__':
     print(summary[cols].head(10).to_string(index=False))
 
     # --- stage 3b: back onto the acquisition dataframe ---
-    df_with_physics = attach_to_dataframe(summary)
+    df_with_physics = attach_to_dataframe(summary, df_true)
+    for f in true_files:
+        _write_run_info(f, df_false, outputs[f], index, raw, summary, started)
+
+    # --- master list ---
+    if ADD_TO_MASTER:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                'MasterList', _HERE.parent / 'MasterList' / 'MasterList.py')
+            master_list = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(master_list)
+            master_list.add_to_master([outputs[f]['measurements'] for f in true_files])
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            print("\nWARNING: the master list was NOT updated (error above). "
+                  "The run's own outputs are saved.")
 
     # --- stage 3c: aggregate error budget across all measurements ---
     error_comp = plot_error_budget_aggregate(summary)
@@ -1978,4 +2173,22 @@ if __name__ == '__main__':
     slope_analysis(summary, target_pressures=(1.0,))
     diffusion_diagnostic(summary, target_pressures=(1.0,))
 
-    print(f"\n{'=' * 60}\nDONE\n{'=' * 60}")
+    print(f"\n{'=' * 60}\nDONE  ->  {output_dir(true_files[0])}\n{'=' * 60}")
+    return dict(index=index, raw=raw, filtered=filtered, summary=summary,
+                diag=diag, final_table=final_table,
+                df_with_physics=df_with_physics, error_comp=error_comp)
+
+
+if __name__ == '__main__':
+    # Run folders from the command line, or Location from the config block.
+    runs = ([(os.path.join(f, TrueName), os.path.join(f, FalseName))
+             for f in sys.argv[1:]] or [(DF_TRUE, DF_FALSE)])
+    for df_true_, df_false_ in runs:
+        _results = main(df_true_, df_false_)
+
+    # plain variables (last run) for Spyder's variable explorer
+    index, raw, filtered = _results['index'], _results['raw'], _results['filtered']
+    summary, diag, final_table = (_results['summary'], _results['diag'],
+                                  _results['final_table'])
+    df_with_physics = _results['df_with_physics']
+    error_comp = _results['error_comp']

@@ -13,11 +13,17 @@ Edit the CONFIG section below to point at your CSV and choose which column
 to plot as the contour color.
 """
  
+import sys
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
- 
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # DataAnalysis/
+from OutputPaths import output_file
+
 # ------------------------- CONFIG -------------------------
 CSV_PATH = r'C:\Users\dptro\Documents\Work\Python\MiniChamberControlCode\DataAnalysis\LasDataAnalysis\MasterResults_Summary_with_Tg_Ns_freq_sweep.csv'         # path to your dataframe, or set df = ... directly
 Z_COL = "gamma"                 # column to use as the contour color
@@ -25,7 +31,7 @@ Z_COL = "gamma"                 # column to use as the contour color
                                      # "N_s_cm3", "power" (delivered), "chi2_median"
 PRESSURE_COL = "pressure"           # set to None if you don't want to fix pressure
 FIXED_PRESSURE = 0.6                # only used if PRESSURE_COL is not None
-OUTPUT_GIF = "Gamma_n2_freq_power_sweep.gif"
+OUTPUT_GIF = "Gamma_n2_freq_power_sweep.gif"  # saved as Output/<CSV folder>/<CSV name>_<this>.gif
 FPS = 1.5                           # frames per second in the gif
 N_LEVELS = 20
 CMAP = "viridis"
@@ -93,8 +99,9 @@ def main():
         fig, update, frames=len(powers), interval=1000 / FPS, blit=False
     )
  
-    ani.save(OUTPUT_GIF, writer=animation.PillowWriter(fps=FPS))
-    print(f"Saved {OUTPUT_GIF} ({len(powers)} frames, one per power level: {powers})")
+    gif = output_file(CSV_PATH, Path(OUTPUT_GIF).stem, '.gif')
+    ani.save(gif, writer=animation.PillowWriter(fps=FPS))
+    print(f"Saved {gif} ({len(powers)} frames, one per power level: {powers})")
  
  
 if __name__ == "__main__":

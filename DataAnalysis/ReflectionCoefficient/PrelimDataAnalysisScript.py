@@ -15,10 +15,13 @@ Usage:
 """
 
 import sys
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import os
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # DataAnalysis/
+from OutputPaths import output_file
 # ── Column definitions ──────────────────────────────────────────────────────
 NUMERIC_COLS = [
     "pressure", "Measured Pressure",
@@ -192,6 +195,7 @@ plt.show()
 summary(df)
 
 
-base, ext = os.path.splitext(filename)
-NewFilename = base + "_processed_1" + ext
+# input dataframe + optimum columns -> Output/<input folder>/<input name>_Reflection.csv
+NewFilename = output_file(filename, 'Reflection')
 df.to_csv(NewFilename, index=False)
+print(f"Saved -> {NewFilename}")

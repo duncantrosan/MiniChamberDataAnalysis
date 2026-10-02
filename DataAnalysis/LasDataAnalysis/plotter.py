@@ -5,12 +5,22 @@ Created on Tue Sep 15 14:19:44 2026
 @author: dptro
 """
 
+import sys
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 
-df = pd.read_csv("ReruningN21TorrTest")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # DataAnalysis/
+from OutputPaths import MASTER_DIR, output_file
+
+# The master summary, or one run's Output/<run>/<dataframe>_LAS_FinalTable.csv
+# (same column names). Figures are saved next to it, named after it.
+RESULTS_CSV = MASTER_DIR / 'Master_Summary.csv'
+
+df = pd.read_csv(RESULTS_CSV)
 
 # best-matched (lowest gamma) frequency for each pressure/power/N2% condition Group data
 best = df.dropna(subset=['Gamma']).loc[
@@ -40,7 +50,7 @@ for p in sorted(best['Pressure_Input_Torr'].dropna().unique()):
     ax.set_ylabel('N$_2$ (%)')
     ax.set_title(f'N$_s$ at 2420 MHz, {p} Torr')
     plt.tight_layout()
-    plt.savefig(f'contour_Ns_bestgamma_{p}Torr.png', dpi=300)
+    plt.savefig(output_file(RESULTS_CSV, f'contour_Ns_bestgamma_{p}Torr', '.png'), dpi=300)
     plt.show()
     
 # Gamma Plot 
