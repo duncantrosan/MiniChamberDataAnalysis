@@ -1,0 +1,377 @@
+# -*- coding: utf-8 -*-
+"""
+ArgonNitrgonReflectionCoefficient
+Created on Wed Apr 29 22:42:06 2026
+
+@author: dptro
+"""
+
+
+# This Code goes through several flow rates and determines the pressure at a varity of mass flow rates 
+# Sweeps. It takes a varity of pressures and gas flow mixtures and powers 
+# takes spectra at each locations
+
+
+# Import ControlFunctions.py and libraries 
+import ControlFunctions as ConF
+import time 
+import serial 
+import json
+import numpy as np
+import pathlib
+import InitializePa as PA
+import pandas as pd
+from datetime import datetime
+import uuid
+import os
+from pathlib import Path
+import matplotlib.pyplot as plt
+
+
+#%% Input values
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+folder = Path(f"Data/OES_{timestamp}")
+SpectraFolder = os.path.join(folder,'Spectra')
+os.makedirs(SpectraFolder, exist_ok=True)
+Pressures = [0.8] # Torr
+FlowRate = 80 # SCCM
+NitrogenPercent = np.linspace(0,10,16) # Percent
+Powers = [30,35,40,45,50,55,60,65]# W
+Freqs = [2420] # MHz
+IntegrationTime = 10 # microseconds
+# Output -- filename contatining three columns  [Flow Rate] [Valve position] [Pressure] [STD]
+OutputInfo = """
+This file takes in an saves all the data from OES data for a varity of power/pressures and saves it also can sweep through nitrgeon concentrations 
+at a set massflow 
+"""
+####################################End Inputs########################################
+ArgonPercent = 100 - NitrogenPercent
+#%% Database Structuring
+# Create Header dictionary 
+run_id = str(uuid.uuid4())[:8]
+
+HeaderData = {
+    "run_id": run_id,
+    "timestamp_start": datetime.now().isoformat(),
+
+    "chamber": "MiniChamberv1",
+    "pa_number": "Rev 4.4.1",
+
+    "gas": {
+        "gas_1": "Argon",
+        "gas_2": "Nitrogen",
+        "gas_3": None,
+        "gas_4": None
+    },
+
+    "experiment_description": (
+        "Reflection coefficient data from PA microwave chamber "
+        "at varying pressure and flow conditions. Measures forward, "
+        "reverse, and delivered power."
+    ),
+
+    "parameters": {
+        "powers": Powers,
+        "frequencies": Freqs,
+        "Mass_Flow_Rate":FlowRate,
+        "Nitrogen_Percent": NitrogenPercent,
+        "Argon_Perccent":ArgonPercent
+    },
+
+    "notes": OutputInfo.strip()
+}
+
+
+#%% Connection to equipment
+print('Attempting to connect to ports...')
+## Connect to Alicat MFCs 
+AlicatData,AlicatCOM = ConF.FindMFCs()
+print(len(AlicatData),'Alicat Mass Flow Controllers Found')
+AlicatSer = serial.Serial(
+                port=AlicatData[0]['port'],
+                baudrate=19200,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1
+            )
+Ar = None
+N2 = None
+for device in AlicatData:
+    if device["gas"].lower() == "ar":
+        Ar = device["address"]
+    if device["gas"].lower() == "n2":
+        N2 = device["address"]
+print('Argon Address ',Ar,'Nitrogen Address ',N2)
+
+# Connect to MKS pressure controller 
+MKS_port = ConF.find_mks_port(baudrate=9600) ## This doesnt seem to work at the moment
+
+print('The MKS Pressure Controller is on ',MKS_port)
+PressureControlSer = serial.Serial(
+                port='COM9',
+                baudrate=9600,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1
+            )
+
+PressureControlSer.write(b'R51 \r\n')
+time.sleep(0.1)  
+response = PressureControlSer.read_until(b'\r')
+print(['The response of the PC is',response])
+
+
+
+
+###### Initilize PA 
+[userfile, cycleTotalTime, cycleOnTime, cycleOffTime, pulse_ms, MAX_PULSE, chamber, process] = PA.InitilizePAs()
+
+###### Initiaize Spectrometer 
+Spec = ConF.ConnectOceanOptics()
+
+
+#%% CSV File and txt file creation 
+
+folder.mkdir(exist_ok=True)
+filepath = folder/'TXTtrial.txt'
+
+#
+# # Create txt file for experiment description 
+with open(filepath, "w") as f:
+    f.write("=== Experiment Description ===\n\n")
+    f.write(OutputInfo + '\n\n')
+    f.write("=== Experiment Header ===\n\n")
+    for key, value in HeaderData.items():
+        f.write(f"{key}\n    {value}\n\n")
+
+        
+#%% Preform Experiment
+# ===== Run metadata =====
+run_id = str(uuid.uuid4())[:8]   # short unique ID like 'a3f91c2d'
+start_time = datetime.now()
+# CSV file with Only Data
+rows = []
+#GammaTemp arrays to be appended to master file
+GammaTemp_Master = [] ########
+# Need to Spark Plasma before the experiment starts 
+PA.SparkPlasmaOnlyPA()
+GammaOld = 0;
+SetPointNumber = 1 # 1 for pressure control 2 for Valve Position Control
+for n in Pressures:
+    #ConF.SetPressureStable(PressureControlSer,n,SetPointNumber )
+    for k in NitrogenPercent:
+        ConF.TwoGasMix(AlicatSer, N2, Ar, FlowRate, k)
+        ArgonGasFlow = ConF.ReadGasFlow(AlicatSer, Ar)
+        NitrogenGasFlow = ConF.ReadGasFlow(AlicatSer, N2)
+        print(f'Argon Gas Flow: {ArgonGasFlow}')
+        print(f'Nitrogen Gas Flow: {NitrogenGasFlow}')
+        time.sleep(10)
+        for j in Powers:
+            command = f'pow del {j}'
+            PA.sendCommand(command)
+            time.sleep(0.5)
+            i = 0
+            for l in Freqs:
+                #pa.write(command.encode('utf-8') + b'\r')
+                # Finds forward power and reverse power 
+                command = f'freq {l}'
+                PA.sendCommand(command)
+                time.sleep(0.05)
+                ForwardPowerTemp = []
+                ReversePowerTemp = []
+                DeliveredPowerTemp = []
+                GammaTemp = []
+                Wavelength = []
+                Intensity = []
+                SpectraRows = []
+                for nn in range(3):
+                    TxtData = PA.singlestat()
+                    DataRow = PA.ParseStat(TxtData)
+                
+                    fwd = float(DataRow['Forward W']['value'])
+                    rev = float(DataRow['Reverse W']['value'])
+                    Temp = float(DataRow['THERM3']['value'])
+                    
+                    ForwardPowerTemp.append(fwd)
+                    ReversePowerTemp.append(rev)
+                    DeliveredPowerTemp.append(fwd - rev)
+                
+                    GammaTemp.append(np.sqrt(rev / fwd) if fwd > 0 else np.nan)
+                    WL , Inten , EC = ConF.TakeSpectra(Spec,IntegrationTime)
+                    Wavelength.append(WL)
+                    Intensity.append(Inten)
+                # Store TempGamma array
+                GammaTemp_Master.append(GammaTemp)
+                # Save the Spectra 
+                # After the nn loop - build the spectra DataFrame
+                spectra_dfs = []
+                for nn, (WL, Inten) in enumerate(zip(Wavelength, Intensity)):
+                    temp_df = pd.DataFrame({
+                        'repeat': nn,
+                        'wavelength': WL,
+                        'intensity': Inten
+                    })
+                    spectra_dfs.append(temp_df)
+
+                SpectraDataFrame = pd.concat(spectra_dfs, ignore_index=True)
+                SpectraFilename = f'Spectra_{j:.2f}W_{n:.2f}Torr_{k:.2f}NitrogenFlow_{l:.2f}MHz.csv'
+                SpectraSaveLocation = os.path.join(SpectraFolder, SpectraFilename)
+                SpectraDataFrame.to_csv(SpectraSaveLocation, index=False)
+                print(f'Data Saved to {SpectraSaveLocation}')
+                    
+                ForwardPower = np.mean(ForwardPowerTemp)
+                ReversePower = np.mean(ReversePowerTemp)
+                DeliveredPower = np.mean(DeliveredPowerTemp)
+                Gamma = np.mean(GammaTemp)
+                ForwardPowerError = np.std(ForwardPowerTemp)
+                ReversePowerError = np.std(ReversePowerTemp)
+                DeliveredPowerError = np.std(DeliveredPowerTemp)
+                GammaError = np.std(GammaTemp)
+                ArgonGasFlow = ConF.ReadGasFlow(AlicatSer, Ar)
+                NitrogenGasFlow = ConF.ReadGasFlow(AlicatSer, N2)
+                MeasuredPressure = ConF.ReadPressure(PressureControlSer)
+                # Saves each data point in a row
+                rows.append({
+                    "run_id": run_id,
+                    "timestamp": datetime.now(),
+                    "date": datetime.now().date(),
+                
+                    "pressure": n,
+                    'Measured Pressure':MeasuredPressure,
+                    'Argon_Gas_Flow':ArgonGasFlow,
+                    'Nitrogen_Gas_Flow':NitrogenGasFlow,
+                    'Nitrogen_Percent':k,
+                    "power": j,
+                    "frequency": l,
+                    "Temperaure3":Temp,
+                    "forward_power": ForwardPower,
+                    "forward_power_error":ForwardPowerError,
+                    "reverse_power": ReversePower,
+                    'reverse_power_error':ReversePowerError,
+                    "delivered_power": DeliveredPower,
+                    'delivered_power_error':DeliveredPowerError,
+                    "gamma": Gamma,
+                    'gamma_error':GammaError,
+                    'OES_File_Location_OceanOptis':SpectraSaveLocation
+                }) 
+                print(f'Forward Power: {ForwardPower}')
+                print(f'Reverse Power: {ReversePower}')
+                print(f'Temp3: {Temp}')
+                print(f'Argon Gas Flow {ArgonGasFlow}')
+                
+                if i > 1:
+                    # Check the discrepancies between gammas
+                    PercentChange = (GammaOld - Gamma)/GammaOld
+                    if PercentChange > 0.2:
+                        PA.rfOff()
+                        print('Plasma Has probably de-ignigted')
+                        break
+                GammaOld = Gamma
+                i = i+1
+                if ReversePower > 50:
+                    print('Warning!! Too much reflected Power!')
+                    PA.rfOff()
+                    break
+        plt.figure(1)
+        plt.clf()
+        plt.plot(WL,Inten)
+        plt.show
+        plt.xlabel('Wavelength / nm')
+        plt.ylabel('Intensity / a.u.')
+        plt.title('f{k}% Nitrogen {j}W Power ')
+        
+# Save Data 
+df = pd.DataFrame(rows)
+filename = f"Reflection_sweep_{run_id}_{start_time.strftime('%Y%m%d_%H%M%S')}.csv"
+SaveLocation = os.path.join(folder,filename)
+df.to_csv(SaveLocation, index=False)
+
+# Merge data with Master File 
+master_file = folder / "Master_Name.csv"
+master_df = df[["run_id","timestamp","pressure","gamma","gamma_error"]]
+
+# Concatinate GammaTemp with Master File 
+df_GammaTemp = pd.DataFrame({"gamma_history": [json.dumps(x) for x in GammaTemp_Master]}) #############
+master_df_combined = pd.concat([master_df,df_GammaTemp],ignore_index = True, axis = 1) #############
+
+read_master = pd.read_csv(master_file) ###########
+
+#Save Indecies pre-merge
+read_master = read_master.reset_index().rename(
+    columns={"index": "master_idx"}
+)#########
+
+master_df_combined = master_df_combined.reset_index().rename(
+    columns={"index": "new_idx"}
+)#########
+
+# Find matching rows
+common_rows = pd.merge(
+    read_master,
+    master_df_combined,
+    on=["pressure", "power", "frequency"],
+    suffixes=("_master", "_new")
+)##########
+
+# Check if matches exist
+if not common_rows.empty:##########
+    for _,row in common_rows.iterrows():
+        master_idx = row["master_idx"]
+        new_idx = row["new_idx"]
+
+        #Convert JSON strings back into arrays
+        gamma_master = json.loads(read_master.loc[master_idx, "gamma_history"])
+        gamma_new = json.loads(master_df_combined.loc[new_idx, "gamma_history"])
+
+        #Concatenate both gamma_history
+        gamma_combined = gamma_master + gamma_new 
+
+        #Recalculate gammas 
+        gamma_mean = np.mean(gamma_combined)
+        gamma_error = np.std(gamma_combined)
+
+        #Rewrite new elements
+        read_master.loc[master_idx, "gamma"] = gamma_mean
+        read_master.loc[master_idx, "gamma_error"] = gamma_error
+        read_master.loc[master_idx, "gamma_history"] = json.dumps(gamma_combined)
+    
+        master_df_combined.loc[new_idx, "gamma"] = gamma_mean
+        master_df_combined.loc[new_idx, "gamma_error"] = gamma_error
+        master_df_combined.loc[new_idx, "gamma_history"] = json.dumps(gamma_combined)
+        
+else:###########
+    print("No matching readings found.")
+
+#Remove Master index comlumn 
+read_master = read_master.drop(columns=["master_idx"]) ########
+
+#Append new to data to master file
+master_df.to_csv(
+    master_df_combined,
+    mode="a",
+    header=not master_file.exists(),
+    index=False
+)#########
+
+# Save JSON file 
+meta_filename = folder / f"metadata_{run_id}.json"
+# with open(meta_filename, "w") as f:
+#     json.dump(HeaderData, f, indent=4)
+
+print(f"Saved: {filename}")
+
+# Turn RF Off
+PA.rfOff()
+# Clear Gas flow
+ConF.ClearGasFlow(AlicatSer, Ar)
+ConF.ClearGasFlow(AlicatSer, N2)
+time.sleep(2)
+# Disconnect from Com Ports
+AlicatSer.close()
+ConF.SetControlValvePosition(PressureControlSer,100,2 )
+PressureControlSer.close()
+PA.ClosePAs()
+
+print('Commands Finished and Serial Ports are closed')
