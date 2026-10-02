@@ -254,10 +254,11 @@ def _upsert(ledger, new):
 def _find_files(folder, skip_dir):
     """
     Every CSV under folder (or folder itself if it is a file), oldest first.
-    Skips master tables, their backups and SimpleMerge outputs (by name, and
-    anything inside skip_dir or Output/Master): they only hold copies of other
-    files' measurements, and an old copy would bring back removed runs. To
-    merge in another master on purpose, use add_to_master on its file.
+    Skips master tables, their backups, SimpleMerge outputs and batch summaries
+    (by name, and anything inside skip_dir or Output/Master): they only hold
+    copies of other files' measurements, and an old copy would bring back
+    removed runs. To merge in another master on purpose, use add_to_master on
+    its Master_AllMeasurements.csv.
     """
     folder = Path(folder)
     if folder.is_file():
@@ -266,7 +267,7 @@ def _find_files(folder, skip_dir):
         raise FileNotFoundError(f"No such folder: {folder}")
     skip = {Path(skip_dir).resolve(), MASTER_DIR.resolve()}
     files = [f for f in folder.rglob('*.csv')
-             if not f.name.startswith(('Master_', 'SimpleMerge_'))
+             if not f.name.startswith(('Master_', 'SimpleMerge_', 'Batch_'))
              and not skip & set(f.resolve().parents)]
     # oldest first, so where two files hold the same measurement the newer wins
     return sorted(files, key=lambda f: (f.stat().st_mtime, f.name))
@@ -533,11 +534,17 @@ def add_to_master(files, master_dir=None):
 
 
 def rebuild_master(folder=REBUILD_FOLDER, master_dir=None):
-    """Build the master from scratch from every per-measurement CSV under folder."""
+    """
+    Build the master from scratch from every per-measurement CSV under folder,
+    or from a list of files.
+    """
     p = _paths(master_dir)
-    files = _find_files(folder, skip_dir=p['dir'])
-    print(f"\n{'=' * 60}\nMASTER LIST: rebuilding from {len(files)} CSV files in\n"
-          f"  {folder}\n{'=' * 60}")
+    if isinstance(folder, (list, tuple)):
+        files, where = [Path(f) for f in folder], 'the listed files'
+    else:
+        files, where = _find_files(folder, skip_dir=p['dir']), folder
+    print(f"\n{'=' * 60}\nMASTER LIST: rebuilding {p['dir']}\n"
+          f"  from {len(files)} CSV files in {where}\n{'=' * 60}")
     ledger, report = _add_files(pd.DataFrame(), files)
     _print_report(report)
     return _save(ledger, master_dir)

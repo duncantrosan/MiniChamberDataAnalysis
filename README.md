@@ -33,10 +33,36 @@ after its input file plus a tag, so each output points back to its input:
 | `<dataframe>_LAS_FileResults.csv` | one row per scope file: fit summary, Birge ratios, stat/sys errors |
 | `<dataframe>_LAS_PeriodFits.csv` | one row per sawtooth period (the raw fits; reused when `RUN_RAW_PROCESSING = False`) |
 | `<dataframe>_LAS_RunInfo.json` | input files, settings, code version, warnings |
+| `<dataframe>_LAS_Log.txt` | everything the run printed, including any error |
 | `LAS_figures/` | plots |
 
-Run it from Spyder after setting `Location`, or from a terminal on one or more
-run folders: `python LASAnalysisv6.py "D:\Data\NafisaData\<run folder>" ...`
+Run it from Spyder after setting `Location`, or from a terminal:
+`python LASAnalysisv6.py "D:\Data\NafisaData\<run folder>" ...`
+
+### A folder of runs
+
+`Location` (or the folder given on the command line) can also be a folder of
+runs, e.g.
+
+    D:\Data\LAS\
+        LAS_1.0Torr_...\     <- a run: its LAS_DataFrame_*.csv files + OscopeData_Laser_True/False
+        LAS_0.9Torr_...\
+        Older\LAS_0.6Torr_...\
+
+Every run folder in it, at any depth, is analysed in turn:
+
+- each run's results go to `Output/<run folder>/` as usual
+- a run that fails is reported and the rest carry on; the error is in its `_LAS_Log.txt`
+- `Output/Batch_<folder>/Batch_Summary.csv` lists every run: status, run_id,
+  pressure, number of measurements, time, error
+- `BATCH_MASTER = 'separate'` (default) writes a master list for just these runs to
+  `Output/Batch_<folder>/`. Merge it into the main one with
+  `python MasterList.py add Output/Batch_<folder>/Master_AllMeasurements.csv`.
+  `'main'` adds the runs straight to `Output/Master/`
+- `SKIP_DONE = True` skips runs already analysed, to carry on after stopping
+  (Ctrl+C) or after adding new run folders. Leave it `False` after changing
+  analysis settings
+- figures are saved but not shown
 
 To put `Output` somewhere else on a computer (e.g. a shared Google Drive
 folder), set the environment variable `MINICHAMBER_OUTPUT` to that folder, or

@@ -47,14 +47,17 @@ No bootstrapping - the covariance+Birge+decomposition path only.
 @author: dptro
 """
 
+import contextlib
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 import glob
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -78,14 +81,16 @@ from OutputPaths import OUTPUT_ROOT, output_dir, output_file
 
 DATA_ROOT = r"D:\Data"
 
-# Folder holding the run's acquisition dataframes. Can also be given on the
-# command line, one or more run folders, each analysed separately:
-#     python LASAnalysisv6.py "D:\Data\NafisaData\<run folder>" ...
+# What to analyse: ONE run folder (the folder holding its LAS_DataFrame_*.csv
+# files), or a FOLDER OF RUNS, e.g. one sub-folder per pressure, at any depth:
+# then every run in it is analysed, one after the other (see "Folder of runs"
+# below). Folders can also be given on the command line:
+#     python LASAnalysisv6.py "D:\Data\NafisaData" ...
 Location = r'D:\Data\NafisaData\LAS_1.0Torr_SmallAdmixture_1kHzLaserFreq_N1.3_very_fine'
 TrueName = 'LAS_DataFrame_*_Laser_True_*.csv'
 FalseName = 'LAS_DataFrame_*_Laser_False_*.csv'
-DF_TRUE = os.path.join(Location, TrueName)
-DF_FALSE = os.path.join(Location, FalseName)
+DF_TRUE = os.path.join(glob.escape(Location), TrueName)
+DF_FALSE = os.path.join(glob.escape(Location), FalseName)
 
 # False: skip the slow fitting and reuse the period fits saved by the last run
 # (<dataframe>_LAS_PeriodFits.csv), e.g. to try other filter settings.
@@ -101,12 +106,33 @@ RUN_RAW_PROCESSING = True
 #                                    ratios, physics with stat/sys errors
 #   <dataframe>_LAS_PeriodFits.csv   one row per sawtooth period (the raw fits)
 #   <dataframe>_LAS_RunInfo.json     inputs, settings and warnings of the run
+#   <dataframe>_LAS_Log.txt          everything the run printed
 #   LAS_figures/                     plots
 OUTPUT_TAG = 'LAS'
 
 # Add <dataframe>_LAS.csv to the master list (Output/Master) after each run.
 # Re-running a dataset replaces its old entries, it never double counts.
 ADD_TO_MASTER = True
+
+# --- Folder of runs ------------------------------------------------------------
+# When Location holds several runs, each run's results still go to
+# Output/<run folder>/, a run that fails is reported and the rest carry on, and
+# Output/Batch_<folder name>/Batch_Summary.csv lists how every run went.
+# Master list for the runs in the folder (instead of ADD_TO_MASTER):
+#   'separate'  its own master list in Output/Batch_<folder name>/, holding
+#               exactly the runs in that folder. To merge it into the main one:
+#               python MasterList.py add Output/Batch_<folder name>/Master_AllMeasurements.csv
+#   'main'      straight into the main master list, Output/Master/
+#   None        no master list
+BATCH_MASTER = 'separate'
+
+# True: skip runs whose _LAS.csv is newer than their dataframe, so a stopped
+# batch can be restarted, or new run folders added, without redoing the rest.
+# Leave False after changing analysis settings, so every run is redone.
+SKIP_DONE = False
+
+# Show figures on screen (they are always saved). Folders of runs never show them.
+SHOW_PLOTS = True
 
 # Stems of files this script (or older versions of it) wrote; never read as input.
 SKIP_SUFFIXES = ('_with_Tg_Ns', '_' + OUTPUT_TAG)
@@ -1529,7 +1555,7 @@ def plot_error_budget_aggregate(summary, fname='error_budget_aggregate.png'):
                  'blue = systematic (absolute)', fontweight='bold')
     fig.tight_layout(rect=(0, 0.04, 1, 1))
     _savefig(fname)
-    plt.show()
+    _show()
     return comp
 
 
@@ -1544,6 +1570,14 @@ def _savefig(name):
     path = os.path.join(FIG_DIR, name)
     plt.savefig(path, dpi=300, bbox_inches='tight')
     print(f"  saved: {path}")
+
+
+def _show():
+    """Show the figure, or close it when nobody is watching (folders of runs)."""
+    if SHOW_PLOTS:
+        plt.show()
+    else:
+        plt.close('all')
 
 
 def check_density(data, x_col, y_col, title=""):
@@ -1590,7 +1624,7 @@ def contour_plot(data, x_col, y_col, z_col, xlabel, ylabel, zlabel,
     ax.legend(loc='best', fontsize=9)
     plt.tight_layout()
     _savefig(fname)
-    plt.show()
+    _show()
     print()
 
 
@@ -1664,7 +1698,7 @@ def line_plot(data, x_col, y_col, series_col, xlabel, ylabel, title, fname,
     ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
     plt.tight_layout()
     _savefig(fname)
-    plt.show()
+    _show()
     print()
 
 
@@ -1828,7 +1862,7 @@ def slope_analysis(summary, target_pressures=(1.0,)):
     ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
     plt.tight_layout()
     _savefig('slope_dNs_dPower_vs_n2.png')
-    plt.show()
+    _show()
 
     for p in sorted(results):
         r = results[p]
@@ -1882,7 +1916,7 @@ def diffusion_diagnostic(summary, target_pressures=(1.0,)):
 
     plt.tight_layout()
     _savefig('diagnostic_diffusion_loss.png')
-    plt.show()
+    _show()
 
     print(f"\n  r(N_s, T)      = {r_T:.4f}")
     print(f"  r(N_s, T^1.5)  = {r_D:.4f}")
@@ -2036,6 +2070,7 @@ def _las_outputs(df_path):
         'file_results': output_file(df_path, f'{t}_FileResults'),
         'period_fits':  output_file(df_path, f'{t}_PeriodFits'),
         'run_info':     output_file(df_path, f'{t}_RunInfo', '.json'),
+        'log':          output_file(df_path, f'{t}_Log', '.txt'),
     }
 
 
@@ -2083,19 +2118,90 @@ def _write_run_info(df_path, df_false, outputs, index, raw, summary, started):
     print(f"Saved run info         -> {outputs['run_info']}")
 
 
-def main(df_true=DF_TRUE, df_false=DF_FALSE, data_root=DATA_ROOT):
+def _master_list():
+    """MasterList.py, loaded from its file (DataAnalysis/MasterList/)."""
+    spec = importlib.util.spec_from_file_location(
+        'MasterList', _HERE.parent / 'MasterList' / 'MasterList.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _clear_caches():
+    """Forget the scope files and paths an earlier run loaded."""
+    for func in (_load_scope, _reference_intensity, resolve_path):
+        func.__defaults__[-1].clear()
+
+
+def _warn(msg):
+    print(f"\nWARNING: {msg}")
+    RUN_WARNINGS.append(msg)
+
+
+def _plot_safely(plot, *args, **kwargs):
+    """One set of plots; if it fails, say so and carry on (results are saved)."""
+    try:
+        return plot(*args, **kwargs)
+    except Exception:
+        traceback.print_exc(file=sys.stdout)
+        plt.close('all')
+        _warn(f"plotting failed in {plot.__name__} (error above); "
+              f"the results are saved")
+        return None
+
+
+class _Tee:
+    """Write to the console and a log file at the same time."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, text):
+        for s in self._streams:
+            s.write(text)
+        return len(text)
+
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
+    def __getattr__(self, name):          # anything else: behave like the console
+        return getattr(self._streams[0], name)
+
+
+def main(df_true=DF_TRUE, df_false=DF_FALSE, data_root=DATA_ROOT, add_master=None):
     """
     Full pipeline for one run: the Laser_True dataframe(s) in df_true and the
-    Laser_False one(s) in df_false. Results go to Output/<run folder>/.
+    Laser_False one(s) in df_false. Results go to Output/<run folder>/, and
+    everything printed also goes to <dataframe>_LAS_Log.txt there.
+    add_master: add the results to the main master list (default ADD_TO_MASTER).
     Returns the intermediate tables as a dict.
     """
-    global FIG_DIR
-    started = datetime.now()
-    RUN_WARNINGS.clear()
-
     true_files = _as_path_list(df_true)
     if not true_files:
         raise FileNotFoundError(f"No Laser_True dataframe matched: {df_true}")
+    if add_master is None:
+        add_master = ADD_TO_MASTER
+
+    log_path = _las_outputs(true_files[0])['log']
+    with open(log_path, 'w', encoding='utf-8') as log, \
+            contextlib.redirect_stdout(_Tee(sys.stdout, log)):
+        false_files = _as_path_list(df_false) or [f'nothing matches {df_false}']
+        print(f"LASAnalysisv6, {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+              f"  Laser_True:  {'; '.join(true_files)}\n"
+              f"  Laser_False: {'; '.join(false_files)}")
+        try:
+            return _main(true_files, df_true, df_false, data_root, add_master)
+        except BaseException:
+            traceback.print_exc(file=log)     # the console gets it from the caller
+            raise
+
+
+def _main(true_files, df_true, df_false, data_root, add_master):
+    global FIG_DIR
+    started = datetime.now()
+    RUN_WARNINGS.clear()
+    _clear_caches()
     outputs = {f: _las_outputs(f) for f in true_files}
     FIG_DIR = output_dir(true_files[0]) / f'{OUTPUT_TAG}_figures'
 
@@ -2146,32 +2252,26 @@ def main(df_true=DF_TRUE, df_false=DF_FALSE, data_root=DATA_ROOT):
 
     # --- stage 3b: back onto the acquisition dataframe ---
     df_with_physics = attach_to_dataframe(summary, df_true)
-    for f in true_files:
-        _write_run_info(f, df_false, outputs[f], index, raw, summary, started)
 
     # --- master list ---
-    if ADD_TO_MASTER:
+    if add_master:
         try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                'MasterList', _HERE.parent / 'MasterList' / 'MasterList.py')
-            master_list = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(master_list)
-            master_list.add_to_master([outputs[f]['measurements'] for f in true_files])
+            _master_list().add_to_master(
+                [outputs[f]['measurements'] for f in true_files])
         except Exception:
-            import traceback
-            traceback.print_exc()
-            print("\nWARNING: the master list was NOT updated (error above). "
-                  "The run's own outputs are saved.")
+            traceback.print_exc(file=sys.stdout)
+            _warn("the master list was NOT updated (error above); "
+                  "the run's own outputs are saved")
 
-    # --- stage 3c: aggregate error budget across all measurements ---
-    error_comp = plot_error_budget_aggregate(summary)
+    # --- stages 3c and 4: plots ---
+    error_comp = _plot_safely(plot_error_budget_aggregate, summary)
+    _plot_safely(make_all_plots, summary)
+    _plot_safely(make_frequency_sweep_plots, summary)
+    _plot_safely(slope_analysis, summary, target_pressures=(1.0,))
+    _plot_safely(diffusion_diagnostic, summary, target_pressures=(1.0,))
 
-    # --- stage 4 ---
-    make_all_plots(summary)
-    make_frequency_sweep_plots(summary)
-    slope_analysis(summary, target_pressures=(1.0,))
-    diffusion_diagnostic(summary, target_pressures=(1.0,))
+    for f in true_files:
+        _write_run_info(f, df_false, outputs[f], index, raw, summary, started)
 
     print(f"\n{'=' * 60}\nDONE  ->  {output_dir(true_files[0])}\n{'=' * 60}")
     return dict(index=index, raw=raw, filtered=filtered, summary=summary,
@@ -2179,16 +2279,161 @@ def main(df_true=DF_TRUE, df_false=DF_FALSE, data_root=DATA_ROOT):
                 df_with_physics=df_with_physics, error_comp=error_comp)
 
 
-if __name__ == '__main__':
-    # Run folders from the command line, or Location from the config block.
-    runs = ([(os.path.join(f, TrueName), os.path.join(f, FalseName))
-             for f in sys.argv[1:]] or [(DF_TRUE, DF_FALSE)])
-    for df_true_, df_false_ in runs:
-        _results = main(df_true_, df_false_)
+# =============================================================================
+# FOLDER OF RUNS
+# =============================================================================
 
-    # plain variables (last run) for Spyder's variable explorer
-    index, raw, filtered = _results['index'], _results['raw'], _results['filtered']
-    summary, diag, final_table = (_results['summary'], _results['diag'],
-                                  _results['final_table'])
-    df_with_physics = _results['df_with_physics']
-    error_comp = _results['error_comp']
+BATCH_COLUMNS = ['run_folder', 'status', 'run_ids', 'pressure_Torr',
+                 'measurements', 'with_T_gas', 'runtime_min', 'error']
+
+
+def _run_patterns(folder):
+    """(Laser_True glob, Laser_False glob) for one run folder."""
+    folder = glob.escape(str(folder))
+    return os.path.join(folder, TrueName), os.path.join(folder, FalseName)
+
+
+def find_run_folders(folder):
+    """Every folder at or below `folder` that holds a Laser_True dataframe."""
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(f"No such folder: {folder}")
+    return sorted(Path(d) for d, _, _ in os.walk(folder)
+                  if _as_path_list(_run_patterns(d)[0]))
+
+
+def _run_is_done(run):
+    """True if every Laser_True dataframe of the run has a newer _LAS.csv."""
+    dfs = _as_path_list(_run_patterns(run)[0])
+    outs = [output_file(f, OUTPUT_TAG) for f in dfs]
+    return bool(dfs) and all(o.exists() and o.stat().st_mtime >= os.path.getmtime(f)
+                             for f, o in zip(dfs, outs))
+
+
+def _describe_run(run):
+    """run_ids, pressures and counts of a finished run, from its _LAS.csv files."""
+    outs = [output_file(f, OUTPUT_TAG) for f in _as_path_list(_run_patterns(run)[0])]
+    outs = [o for o in outs if o.exists()]
+    if not outs:
+        return {}, []
+    t = pd.concat([pd.read_csv(o, dtype={RUN_ID_COL: str}) for o in outs])
+    info = {
+        'run_ids': ';'.join(t[RUN_ID_COL].astype(str).unique()),
+        'pressure_Torr': ';'.join(f'{p:g}' for p in sorted(t['pressure'].dropna().unique())),
+        'measurements': len(t),
+        'with_T_gas': int(t['T_gas_K'].notna().sum()) if 'T_gas_K' in t else 0,
+    }
+    return info, outs
+
+
+def run_batch(folder, runs=None):
+    """
+    Analyse every run folder under `folder`, one after the other. A run that
+    fails is recorded and the rest carry on. Writes
+    Output/Batch_<folder name>/Batch_Summary.csv and the master list chosen by
+    BATCH_MASTER. Returns the summary table.
+    """
+    global SHOW_PLOTS
+    folder = Path(folder)
+    runs = find_run_folders(folder) if runs is None else runs
+    batch_dir = OUTPUT_ROOT / f'Batch_{folder.resolve().name}'
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n{'=' * 70}\nFOLDER OF RUNS: {len(runs)} runs in {folder}\n{'=' * 70}")
+    for i, run in enumerate(runs, 1):
+        print(f"  {i:3d}. {run.relative_to(folder)}")
+    names = pd.Series([r.name for r in runs])
+    same = sorted(set(names[names.duplicated()]))
+    if same:
+        print(f"\nWARNING: more than one run folder is called {same}. Their results "
+              f"share Output/<name>/: the tables stay apart (named after each "
+              f"dataframe) but the figures overwrite each other.")
+
+    rows, las_files, stopped = [], [], False
+    batch_start = datetime.now()
+    show_plots, SHOW_PLOTS = SHOW_PLOTS, False
+    try:
+        for i, run in enumerate(runs, 1):
+            print(f"\n{'#' * 70}\n# RUN {i}/{len(runs)}: {run}\n{'#' * 70}")
+            row = {'run_folder': str(run), 'status': 'ok', 'error': ''}
+            t0 = datetime.now()
+            try:
+                if SKIP_DONE and _run_is_done(run):
+                    row['status'] = 'skipped: already done'
+                    print("Results are newer than the dataframes: skipped (SKIP_DONE)")
+                else:
+                    main(*_run_patterns(run), add_master=False)
+            except KeyboardInterrupt:
+                row.update(status='stopped', error='stopped by user')
+                stopped = True
+            except (Exception, SystemExit) as e:
+                row.update(status='FAILED', error=f'{type(e).__name__}: {e}')
+                print(f"\nRUN FAILED: {row['error']}\n  Full error in "
+                      f"{OUTPUT_ROOT / run.name}/*_LAS_Log.txt (if the run got that far)")
+            finally:
+                plt.close('all')
+            row['runtime_min'] = round((datetime.now() - t0).total_seconds() / 60, 2)
+            if row['status'] in ('ok', 'skipped: already done'):
+                info, outs = _describe_run(run)
+                row.update(info)
+                las_files += outs
+            rows.append(row)
+            if stopped:
+                break
+    finally:
+        SHOW_PLOTS = show_plots
+
+    table = pd.DataFrame(rows, columns=BATCH_COLUMNS)
+    table[['measurements', 'with_T_gas']] = table[['measurements', 'with_T_gas']].astype('Int64')
+    table.to_csv(batch_dir / 'Batch_Summary.csv', index=False)
+    counts = table['status'].value_counts()
+    minutes = (datetime.now() - batch_start).total_seconds() / 60
+    print(f"\n{'=' * 70}\nFOLDER OF RUNS {'STOPPED' if stopped else 'DONE'} "
+          f"after {minutes:.1f} min: "
+          + ", ".join(f"{n} {s}" for s, n in counts.items())
+          + (f", {len(runs) - len(rows)} not started" if len(rows) < len(runs) else '')
+          + f"\n{'=' * 70}")
+    show = table.assign(run_folder=[Path(r).name for r in table['run_folder']])
+    print(show.drop(columns='error').to_string(index=False))
+    for _, r in table[table['status'] == 'FAILED'].iterrows():
+        print(f"  FAILED {Path(r['run_folder']).name}: {r['error']}")
+    print(f"Summary -> {batch_dir / 'Batch_Summary.csv'}")
+    if stopped:
+        print("Stopped by user, so the master list was left as it was. To carry "
+              "on without redoing the finished runs, set SKIP_DONE = True and "
+              "run the folder again.")
+
+    if BATCH_MASTER and las_files and not stopped:
+        try:
+            if BATCH_MASTER == 'separate':
+                _master_list().rebuild_master(las_files, master_dir=batch_dir)
+            elif BATCH_MASTER == 'main':
+                _master_list().add_to_master(las_files)
+            else:
+                print(f"WARNING: BATCH_MASTER = {BATCH_MASTER!r}: use 'separate', "
+                      f"'main' or None. No master list written.")
+        except Exception:
+            traceback.print_exc()
+            print("WARNING: master list not written (error above); "
+                  "every run's own results are saved.")
+    return table
+
+
+if __name__ == '__main__':
+    # A run folder or a folder of runs, from the command line or Location.
+    _results = None
+    for target in (sys.argv[1:] or [Location]):
+        runs_found = find_run_folders(target)
+        if not runs_found:
+            raise SystemExit(f"No {TrueName} in {target} or any folder below it.")
+        if runs_found == [Path(target)]:
+            _results = main(*_run_patterns(target))
+        else:
+            batch_summary = run_batch(target, runs_found)
+
+    # plain variables (last single run) for Spyder's variable explorer
+    if _results is not None:
+        index, raw, filtered = _results['index'], _results['raw'], _results['filtered']
+        summary, diag, final_table = (_results['summary'], _results['diag'],
+                                      _results['final_table'])
+        df_with_physics = _results['df_with_physics']
+        error_comp = _results['error_comp']
