@@ -111,6 +111,18 @@ A new diagnostic fits in if its output keeps the input dataframe's rows
 `SimpleMerge.py` only stacks every dataframe in a folder into
 `Output/Master/SimpleMerge_<folder>.csv`, with a `source_file` column.
 
+## Compare with a reference
+
+`DataAnalysis/LasDataAnalysis/PlotNsVsReference.py` plots the Ar 1s5 metastable density
+of a reference (e.g. a pure-argon take at 85 W) against pressure, and puts our N_s from a
+master list on top as stars. By default only our pure-argon points within 5 W of 85 W
+delivered power are plotted (`N2_MAX_PERCENT`, `POWER_W`, `POWER_TOL_W` at the top of the
+script). The reference file is not part of the repository: put it in `ReferenceData/`
+(`1s_densities_microwave_nc.csv`) or set `REFERENCE_CSV`. Run it from Spyder, or
+`python PlotNsVsReference.py [MASTER_SUMMARY.csv] [REFERENCE.csv]`. The figure is saved next to
+the master list as `Master_Summary_vs_PureAr_1s5.png`, and the table of plotted points, with the
+ratio to the reference at the same pressure, is printed.
+
 ## Older files
 
 `LASanalysis.py`, `LASAnalysisV2.py`, `LASAnalysisV3.py`,
