@@ -34,7 +34,13 @@ after its input file plus a tag, so each output points back to its input:
 | `<dataframe>_LAS_PeriodFits.csv` | one row per sawtooth period (the raw fits; reused when `RUN_RAW_PROCESSING = False`) |
 | `<dataframe>_LAS_RunInfo.json` | input files, settings, code version, warnings |
 | `<dataframe>_LAS_Log.txt` | everything the run printed, including any error |
-| `LAS_figures/` | plots |
+| `LAS_figures/` | plots, including `representative_fits.png` |
+
+`LAS_figures/representative_fits.png` shows `N_REPRESENTATIVE_FITS` (10) random fits that went into the
+results: the absorbance data, the fitted Gaussian and the residuals, labelled with power, N2 %,
+sawtooth period, chi2 and FWHM. It is saved for every run, folder of runs included, and also shown on
+screen when you analyse a single run. `FIT_PLOT_SEED = 0` always picks the same fits; set it to `None`
+for different ones each run.
 
 Run it from Spyder after setting `Location`, or from a terminal:
 `python LASAnalysisv6.py "D:\Data\NafisaData\<run folder>" ...`

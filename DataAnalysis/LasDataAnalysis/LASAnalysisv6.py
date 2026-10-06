@@ -207,6 +207,17 @@ FSR_REL_ERR    = 0.005    # etalon free spectral range uncertainty (0.5 %).
 # --- Plotting ----------------------------------------------------------------
 SAVE_FIGURES = True
 FIG_DIR = OUTPUT_ROOT / 'LAS_figures'    # main() points this at Output/<run>/LAS_figures
+
+# Representative fits: one sheet of N random fits that went into the results
+# (data, fitted line, residuals), saved as LAS_figures/representative_fits.png
+# for every run, folder of runs included, and shown on screen for a single run.
+# 0 or None turns it off. FIT_PLOT_SEED = None picks different fits every run.
+N_REPRESENTATIVE_FITS = 10
+FIT_PLOT_SEED = 0
+
+# Old per-fit pop-up: show every Nth fit as it is made (None = off). These
+# windows are closed again after each run of a folder of runs, so use the
+# representative-fits sheet above to look at fits there.
 PLOT_EVERY_N_FITS = None
 
 # Settings copied into <dataframe>_LAS_RunInfo.json
@@ -216,7 +227,7 @@ RUN_INFO_SETTINGS = [
     'A_KI', 'A_KI_REL_ERR', 'LAMBDA_0', 'M_AR', 'G_LOWER', 'G_UPPER',
     'MIN_POINTS_PER_PERIOD', 'MIN_PEAKS_PER_PERIOD', 'STRUCTURE_WINDOW',
     'FP_CHANNEL', 'RAMP_CHANNEL', 'DIODE_CHANNEL', 'BIAS_VOLTAGE',
-    'RUN_RAW_PROCESSING', 'DATA_ROOT',
+    'RUN_RAW_PROCESSING', 'DATA_ROOT', 'N_REPRESENTATIVE_FITS', 'FIT_PLOT_SEED',
 ]
 
 # Problems met during a run; written to the run info file.
@@ -1563,12 +1574,12 @@ def plot_error_budget_aggregate(summary, fname='error_budget_aggregate.png'):
 # STAGE 4: PLOTTING HELPERS
 # =============================================================================
 
-def _savefig(name):
+def _savefig(name, dpi=300):
     if not SAVE_FIGURES:
         return
     os.makedirs(FIG_DIR, exist_ok=True)
     path = os.path.join(FIG_DIR, name)
-    plt.savefig(path, dpi=300, bbox_inches='tight')
+    plt.savefig(path, dpi=dpi, bbox_inches='tight')
     print(f"  saved: {path}")
 
 
@@ -1578,6 +1589,131 @@ def _show():
         plt.show()
     else:
         plt.close('all')
+
+
+# --- representative fits -------------------------------------------------------
+
+FIT_DATA_COLOR = '#2a78d6'    # data points
+FIT_LINE_COLOR = '#eb6834'    # fitted line
+
+
+def _row_absorbance(row):
+    """
+    Frequency axis, sawtooth periods and absorbance of one index row, built the
+    same way process_index builds them (so a re-fit gives the stored result).
+    """
+    mean_on = _load_scope(row['path_on'])
+    mean_off = _load_scope(row['path_off'])
+    t_ref, i_ref_full = _reference_intensity(row['ref_on'], row['ref_off'])
+
+    t_meas = mean_on.index.to_numpy()
+    i_off = (mean_off[DIODE_CHANNEL].to_numpy() if mean_on.index.equals(mean_off.index)
+             else np.interp(t_meas, mean_off.index.to_numpy(),
+                            mean_off[DIODE_CHANNEL].to_numpy()))
+    i_ref = (i_ref_full if np.array_equal(t_meas, t_ref)
+             else np.interp(t_meas, t_ref, i_ref_full))
+
+    frequency, periods = find_relative_frequency(mean_on)
+    i_m = mean_on[DIODE_CHANNEL].to_numpy() - i_off + BIAS_VOLTAGE
+    with np.errstate(divide='ignore', invalid='ignore'):
+        absorbance = np.log((i_ref + BIAS_VOLTAGE) / i_m)
+    return frequency, periods, absorbance
+
+
+def plot_representative_fits(index, filtered, n=None, seed=FIT_PLOT_SEED,
+                             fname='representative_fits.png'):
+    """
+    One sheet of n random fits from the periods that went into the results:
+    for each, the absorbance data with the fitted Gaussian, and the residual.
+
+    Picks n different scope files at random, then one of each file's kept
+    periods. Each is re-fitted from its scope file (about a second each), so
+    this works after a cached run (RUN_RAW_PROCESSING = False) too.
+    """
+    n = N_REPRESENTATIVE_FITS if n is None else n
+    if not n:
+        return None
+    uids = filtered['row_uid'].unique()
+    if len(uids) == 0:
+        print("  representative fits: no fits to show")
+        return None
+
+    rng = np.random.default_rng(seed)
+    chosen = rng.choice(uids, size=min(n, len(uids)), replace=False)
+    rows = index.drop_duplicates('row_uid').set_index('row_uid')
+
+    print(f"\nRepresentative fits: re-fitting {len(chosen)} random periods "
+          f"(of {len(uids)} scope files)")
+    fits = []
+    for uid in chosen:
+        k = int(rng.choice(filtered.loc[filtered['row_uid'] == uid, 'period']))
+        row = rows.loc[uid]
+        try:
+            frequency, periods, absorbance = _row_absorbance(row)
+            sl = periods[k]['slice']
+            f, y = frequency[sl], absorbance[sl]
+            mask = np.isfinite(f) & np.isfinite(y)
+            res = analyze_period(f[mask], y[mask], estimate_noise(y[mask]))
+        except Exception as e:
+            print(f"  {row['basename']} period {k}: could not re-fit ({e})")
+            continue
+        order = np.argsort(f[mask])
+        res['f_data'] = f[mask][order] / 1e9 - res['x0']
+        res['y_data'] = y[mask][order]
+        res['label'] = periods[k]['label']
+        res['row'] = row
+        fits.append(res)
+    if not fits:
+        return None
+    fits.sort(key=lambda r: (r['row']['power'], r['row']['n2_flow']))
+
+    ncols = min(5, len(fits))
+    nrows = int(np.ceil(len(fits) / ncols))
+    fig = plt.figure(figsize=(3.9 * ncols, 3.7 * nrows))
+    outer = fig.add_gridspec(nrows, ncols, hspace=0.5, wspace=0.3)
+    for i, res in enumerate(fits):
+        r, c = divmod(i, ncols)
+        inner = outer[r, c].subgridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+        ax = fig.add_subplot(inner[0])
+        axr = fig.add_subplot(inner[1], sharex=ax)
+
+        fd, yd = res['f_data'], res['y_data']
+        dense = np.linspace(fd.min(), fd.max(), 600)
+        pars = (res['A'], res['x0'], res['sigma'], res['offset'], res['slope'])
+        curve = gaussian_lin(dense + res['x0'], *pars)
+        resid = yd - gaussian_lin(fd + res['x0'], *pars)
+
+        ax.plot(fd, yd, '.', ms=2.5, alpha=0.45, color=FIT_DATA_COLOR,
+                label='data', rasterized=True)
+        ax.plot(dense, curve, '-', lw=1.6, color=FIT_LINE_COLOR, label='fit')
+        axr.plot(fd, resid, '.', ms=2.5, alpha=0.45, color=FIT_DATA_COLOR,
+                 rasterized=True)
+        axr.axhline(0, color=FIT_LINE_COLOR, lw=1.0)
+
+        row = res['row']
+        ax.set_title(f"{row['power']:.0f} W, {row['n2_flow']:.2f} % N$_2$, "
+                     f"{row['freq']:.0f} MHz\n{res['label']}: "
+                     f"$\\chi^2_\\nu$ {res['Chi^2']:.2f}, "
+                     f"FWHM {res['fwhm']:.2f} GHz", fontsize=8.5)
+        plt.setp(ax.get_xticklabels(), visible=False)
+        for a in (ax, axr):
+            a.grid(True, alpha=0.2, lw=0.6)
+            a.tick_params(labelsize=8)
+            for side in ('top', 'right'):
+                a.spines[side].set_visible(False)
+        if c == 0:
+            ax.set_ylabel('Absorbance', fontsize=9)
+            axr.set_ylabel('residual', fontsize=9)
+        if r == nrows - 1 or i + ncols >= len(fits):
+            axr.set_xlabel('Relative frequency (GHz)', fontsize=9)
+        if i == 0:
+            ax.legend(fontsize=8, frameon=False, loc='upper right')
+
+    fig.suptitle(f"Representative fits: {len(fits)} random periods used in the "
+                 f"results of {len(uids)} scope files", fontsize=12, y=0.995)
+    _savefig(fname, dpi=200)
+    _show()
+    return fits
 
 
 def check_density(data, x_col, y_col, title=""):
@@ -2264,6 +2400,7 @@ def _main(true_files, df_true, df_false, data_root, add_master):
                   "the run's own outputs are saved")
 
     # --- stages 3c and 4: plots ---
+    _plot_safely(plot_representative_fits, index, filtered)
     error_comp = _plot_safely(plot_error_budget_aggregate, summary)
     _plot_safely(make_all_plots, summary)
     _plot_safely(make_frequency_sweep_plots, summary)
